@@ -1,0 +1,27 @@
+# CORE PYTHON & DJANGO
+ms-python.python
+ms-python.vscode-pylance
+batisteo.vscode-django
+
+# API & BACKEND TESTING
+humao.rest-client
+qwtel.sqlite-viewer
+
+# CODE FORMAT & QUALITY
+ms-python.black-formatter
+ms-python.isort
+ms-python.flake8
+
+# GIT & PROJECT MANAGEMENT
+eamodio.gitlens
+editorconfig.editorconfig
+
+# ENVIRONMENT & DEVOPS
+mikestead.dotenv
+ms-azuretools.vscode-docker
+
+# PRODUCTIVITY (REMOVED BUT OPTIONAL)
+aaron-bond.better-comments
+djangorestframework 
+django-filter 
+Pillow 
