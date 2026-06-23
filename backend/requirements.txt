@@ -1,27 +1,26 @@
-# CORE PYTHON & DJANGO
-ms-python.python
-ms-python.vscode-pylance
-batisteo.vscode-django
+# Hotel Management System — backend dependencies (Phase 1 foundation)
+# Python 3.13
 
-# API & BACKEND TESTING
-humao.rest-client
-qwtel.sqlite-viewer
+# Core
+Django==6.0.1
+djangorestframework==3.16.1
+djangorestframework-simplejwt==5.5.1
+django-filter==25.2
+django-cors-headers==4.9.0
+django-environ==0.13.0
+drf-spectacular==0.29.0
 
-# CODE FORMAT & QUALITY
-ms-python.black-formatter
-ms-python.isort
-ms-python.flake8
+# Database
+psycopg[binary]==3.3.4
 
-# GIT & PROJECT MANAGEMENT
-eamodio.gitlens
-editorconfig.editorconfig
+# Cache / queue
+redis==8.0.0
+django-redis==7.0.0
+celery==5.6.3
 
-# ENVIRONMENT & DEVOPS
-mikestead.dotenv
-ms-azuretools.vscode-docker
+# Media
+Pillow==12.1.0
 
-# PRODUCTIVITY (REMOVED BUT OPTIONAL)
-aaron-bond.better-comments
-djangorestframework 
-django-filter 
-Pillow 
+# Production server / static files
+gunicorn==26.0.0
+whitenoise==6.12.0

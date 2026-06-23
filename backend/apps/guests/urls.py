@@ -1,9 +1,10 @@
-from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import GuestViewSet, GuestDocumentViewSet
+
+from .views import GuestViewSet
+
+app_name = "guests"
 
 router = DefaultRouter()
-router.register(r"guests", GuestViewSet, basename="guests")
-router.register(r"guest-documents", GuestDocumentViewSet, basename="guest-documents")
+router.register("", GuestViewSet, basename="guest")
 
-urlpatterns = [path("", include(router.urls))]
+urlpatterns = router.urls

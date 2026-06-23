@@ -1,176 +1,146 @@
-from rest_framework import viewsets
+from __future__ import annotations
+
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound as DRFNotFound
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.utils.dateparse import parse_date
 
-from apps.common.permissions import IsPropertyStaff, HasPropertyObjectAccess
-from apps.properties.models import Property, Room
-from .models import Reservation, RoomMoveLog, ReservationCharge
+from apps.guests.models import Guest
+from apps.properties.models import Property
+from apps.rbac.constants import Perm
+from apps.rbac.permissions import HasOrgPermission
+
+from . import selectors, services
+from .models import Reservation
 from .serializers import (
-    ReservationSerializer, StatusUpdateSerializer,
-    RoomAssignSerializer, RoomMoveSerializer,
-    ChargeCreateSerializer
+    AvailabilitySearchSerializer,
+    CancelSerializer,
+    ChargeCreateSerializer,
+    ReservationChargeSerializer,
+    ReservationCreateSerializer,
+    ReservationModifySerializer,
+    ReservationSerializer,
 )
-from .services import availability_by_room_type, available_rooms, ACTIVE_STATUSES
 
-def get_property_from_header(request):
-    prop_id = request.headers.get("X-PROPERTY-ID")
-    return Property.objects.get(id=prop_id)
+# Map viewset action -> required permission codes.
+_ACTION_PERMS = {
+    "list": {Perm.RESERVATION_VIEW},
+    "retrieve": {Perm.RESERVATION_VIEW},
+    "availability": {Perm.RESERVATION_VIEW},
+    "create": {Perm.RESERVATION_MANAGE},
+    "partial_update": {Perm.RESERVATION_MANAGE},
+    "update": {Perm.RESERVATION_MANAGE},
+    "cancel": {Perm.RESERVATION_MANAGE},
+    "add_charge": {Perm.RESERVATION_MANAGE},
+    "check_in": {Perm.RESERVATION_OPERATE},
+    "check_out": {Perm.RESERVATION_OPERATE},
+}
+
 
 class ReservationViewSet(viewsets.ModelViewSet):
     serializer_class = ReservationSerializer
-    permission_classes = [IsAuthenticated, IsPropertyStaff, HasPropertyObjectAccess]
-    search_fields = ["code", "source", "internal_notes"]
-    ordering_fields = ["created_at", "check_in", "status"]
-    filterset_fields = ["status", "room_type", "room"]
+    permission_classes = [HasOrgPermission]
+    lookup_field = "id"
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    filterset_fields = ("status", "property")
+    search_fields = ("code",)
+    ordering_fields = ("created_at", "check_in")
+
+    def get_required_permissions(self) -> set[str]:
+        return _ACTION_PERMS.get(self.action, {Perm.RESERVATION_VIEW})
 
     def get_queryset(self):
-        prop = get_property_from_header(self.request)
-        return (
-            Reservation.objects.filter(property=prop)
-            .select_related("room_type", "room")
-            .prefetch_related("guests", "charges", "moves")
+        if getattr(self, "swagger_fake_view", False):
+            return Reservation.objects.none()
+        return selectors.list_reservations(
+            organization=self.request.organization,
+            property_id=self.request.query_params.get("property"),
+            status=self.request.query_params.get("status"),
         )
 
-    def get_serializer_context(self):
-        ctx = super().get_serializer_context()
-        ctx["property"] = get_property_from_header(self.request)
-        return ctx
+    # --- helpers ---
+    def _get_property(self, property_id) -> Property:
+        obj = Property.all_objects.filter(
+            organization=self.request.organization, id=property_id
+        ).first()
+        if obj is None:
+            raise DRFNotFound("Property not found in this organization.")
+        return obj
 
-    def perform_create(self, serializer):
-        serializer.save()
+    def _get_guest(self, guest_id):
+        if guest_id is None:
+            return None
+        guest = Guest.objects.all_tenants().filter(
+            organization=self.request.organization, id=guest_id
+        ).first()
+        if guest is None:
+            raise DRFNotFound("Guest not found in this organization.")
+        return guest
 
-    @action(detail=True, methods=["POST"])
-    def set_status(self, request, pk=None):
-        reservation = self.get_object()
-        ser = StatusUpdateSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        new_status = ser.validated_data["status"]
-
-        allowed = {
-            s for s in
-            __import__("apps.reservations.serializers", fromlist=["ALLOWED_TRANSITIONS"]).ALLOWED_TRANSITIONS[reservation.status]
-        }
-        if new_status not in allowed:
-            return Response(
-                {"detail": f"Invalid transition from {reservation.status} to {new_status}"},
-                status=400
-            )
-
-        # Real-life rules:
-        # - Cannot check-in without room assignment (recommended). If no room, still allow if you want.
-        if new_status == Reservation.Status.CHECKED_IN and reservation.room_id is None:
-            return Response({"detail": "Assign a room before check-in."}, status=400)
-
-        reservation.status = new_status
-        reservation.full_clean()
-        reservation.save(update_fields=["status"])
-        return Response(self.get_serializer(reservation).data)
-
-    @action(detail=True, methods=["POST"])
-    def assign_room(self, request, pk=None):
-        reservation = self.get_object()
-        ser = RoomAssignSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        room_id = ser.validated_data["room_id"]
-
-        if reservation.status not in [Reservation.Status.BOOKED, Reservation.Status.INQUIRY]:
-            return Response({"detail": "Room can be assigned only for inquiry/booked."}, status=400)
-
-        prop = get_property_from_header(request)
-        room = Room.objects.get(id=room_id, property=prop)
-
-        if room.room_type_id != reservation.room_type_id:
-            return Response({"detail": "Room type mismatch."}, status=400)
-
-        # Ensure room not already reserved for overlapping dates (only checks assigned rooms)
-        conflict = Reservation.objects.filter(
-            property=prop,
-            status__in=ACTIVE_STATUSES,
-            room=room,
-            check_in__lt=reservation.check_out,
-            check_out__gt=reservation.check_in,
-        ).exclude(id=reservation.id).exists()
-        if conflict:
-            return Response({"detail": "Room is not available for those dates."}, status=400)
-
-        reservation.room = room
-        reservation.full_clean()
-        reservation.save(update_fields=["room"])
-        return Response(self.get_serializer(reservation).data)
-
-    @action(detail=True, methods=["POST"])
-    def move_room(self, request, pk=None):
-        reservation = self.get_object()
-        ser = RoomMoveSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-
-        if reservation.status != Reservation.Status.CHECKED_IN:
-            return Response({"detail": "Room move allowed only after check-in."}, status=400)
-
-        prop = get_property_from_header(request)
-        to_room = Room.objects.get(id=ser.validated_data["to_room_id"], property=prop)
-
-        if to_room.room_type_id != reservation.room_type_id:
-            return Response({"detail": "Room type mismatch."}, status=400)
-
-        conflict = Reservation.objects.filter(
-            property=prop,
-            status__in=ACTIVE_STATUSES,
-            room=to_room,
-            check_in__lt=reservation.check_out,
-            check_out__gt=reservation.check_in,
-        ).exclude(id=reservation.id).exists()
-        if conflict:
-            return Response({"detail": "Target room is not available."}, status=400)
-
-        old_room = reservation.room
-        reservation.room = to_room
-        reservation.full_clean()
-        reservation.save(update_fields=["room"])
-
-        RoomMoveLog.objects.create(
-            property=prop,
-            reservation=reservation,
-            from_room=old_room,
-            to_room=to_room,
-            reason=ser.validated_data.get("reason", "")
+    # --- CRUD ---
+    def create(self, request, *args, **kwargs):
+        s = ReservationCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        reservation = services.create_reservation(
+            organization=request.organization,
+            property=self._get_property(data["property"]),
+            check_in=data["check_in"],
+            check_out=data["check_out"],
+            primary_guest=self._get_guest(data.get("primary_guest")),
+            adults=data["adults"],
+            children=data["children"],
+            source=data["source"],
+            special_requests=data["special_requests"],
+            room_requests=data["rooms"],
+            by_user=request.user,
         )
-        return Response(self.get_serializer(reservation).data)
+        return Response(ReservationSerializer(reservation).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=["POST"])
-    def add_charge(self, request, pk=None):
-        reservation = self.get_object()
-        ser = ChargeCreateSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        ReservationCharge.objects.create(reservation=reservation, **ser.validated_data)
-        return Response(self.get_serializer(reservation).data, status=201)
+    def partial_update(self, request, *args, **kwargs):
+        s = ReservationModifySerializer(data=request.data, partial=True)
+        s.is_valid(raise_exception=True)
+        reservation = services.modify_reservation(
+            reservation=self.get_object(), by_user=request.user, **s.validated_data
+        )
+        return Response(ReservationSerializer(reservation).data)
 
-class AvailabilityViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated, IsPropertyStaff]
+    # --- lifecycle actions ---
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, id=None):
+        s = CancelSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        reservation = services.cancel_reservation(
+            reservation=self.get_object(), by_user=request.user, reason=s.validated_data["reason"]
+        )
+        return Response(ReservationSerializer(reservation).data)
 
-    def list(self, request):
-        """
-        GET /api/reservations/availability/?start=YYYY-MM-DD&end=YYYY-MM-DD
-        Optional: room_type=<uuid> to list available rooms for that type
-        """
-        prop = get_property_from_header(request)
-        start = parse_date(request.query_params.get("start", ""))
-        end = parse_date(request.query_params.get("end", ""))
+    @action(detail=True, methods=["post"], url_path="check-in")
+    def check_in(self, request, id=None):
+        reservation = services.check_in(reservation=self.get_object(), by_user=request.user)
+        return Response(ReservationSerializer(reservation).data)
 
-        if not start or not end or start >= end:
-            return Response({"detail": "Provide valid start and end dates."}, status=400)
+    @action(detail=True, methods=["post"], url_path="check-out")
+    def check_out(self, request, id=None):
+        reservation = services.check_out(reservation=self.get_object(), by_user=request.user)
+        return Response(ReservationSerializer(reservation).data)
 
-        room_type_id = request.query_params.get("room_type")
-        if room_type_id:
-            qs = available_rooms(prop.id, room_type_id, start, end)
-            return Response({
-                "start": str(start),
-                "end": str(end),
-                "room_type": room_type_id,
-                "rooms": [{"id": str(r.id), "number": r.number, "hk": r.housekeeping_status} for r in qs],
-            })
+    @action(detail=True, methods=["post"])
+    def add_charge(self, request, id=None):
+        s = ChargeCreateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        charge = services.add_charge(reservation=self.get_object(), **s.validated_data)
+        return Response(ReservationChargeSerializer(charge).data, status=status.HTTP_201_CREATED)
 
-        data = availability_by_room_type(prop.id, start, end)
-        return Response({"start": str(start), "end": str(end), "by_room_type": data})
+    @action(detail=False, methods=["get"])
+    def availability(self, request):
+        s = AvailabilitySearchSerializer(data=request.query_params)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data
+        summary = selectors.availability_summary(
+            organization=request.organization,
+            property=self._get_property(data["property"]),
+            check_in=data["check_in"],
+            check_out=data["check_out"],
+        )
+        return Response(summary)

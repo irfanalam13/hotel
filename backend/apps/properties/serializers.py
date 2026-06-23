@@ -1,45 +1,29 @@
+from __future__ import annotations
+
 from rest_framework import serializers
-from .models import Property, Amenity, RoomType, Room
+
+from .models import Property
+
 
 class PropertySerializer(serializers.ModelSerializer):
     class Meta:
         model = Property
-        fields = ["id", "name", "code", "timezone", "currency", "created_at"]
+        fields = (
+            "id", "name", "code", "address", "city", "country",
+            "phone", "email", "timezone", "currency", "star_rating",
+            "is_active", "created_at",
+        )
+        read_only_fields = ("id", "code", "created_at")
 
-class AmenitySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Amenity
-        fields = ["id", "property", "name"]
-        read_only_fields = ["property"]
 
-class RoomTypeSerializer(serializers.ModelSerializer):
-    amenities = serializers.PrimaryKeyRelatedField(many=True, required=False, read_only=False, queryset=Amenity.objects.all())
-
-    class Meta:
-        model = RoomType
-        fields = ["id", "property", "name", "code", "max_adults", "max_children", "base_rate", "amenities"]
-        read_only_fields = ["property"]
-
-    def validate_amenities(self, amenities):
-        prop = self.context["property"]
-        for a in amenities:
-            if a.property_id != prop.id:
-                raise serializers.ValidationError("Amenity must belong to the same property.")
-        return amenities
-
-class RoomSerializer(serializers.ModelSerializer):
-    room_type_detail = RoomTypeSerializer(source="room_type", read_only=True)
-
-    class Meta:
-        model = Room
-        fields = [
-            "id", "property", "room_type", "room_type_detail",
-            "number", "floor", "is_active", "housekeeping_status", "notes"
-        ]
-        read_only_fields = ["property"]
-
-    def validate_room_type(self, room_type):
-        prop = self.context["property"]
-        if room_type.property_id != prop.id:
-            raise serializers.ValidationError("Room type must belong to the same property.")
-        return room_type
+class PropertyCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=200)
+    code = serializers.SlugField(max_length=50, required=False)
+    address = serializers.CharField(required=False, allow_blank=True, default="")
+    city = serializers.CharField(required=False, allow_blank=True, default="")
+    country = serializers.CharField(required=False, allow_blank=True, default="")
+    phone = serializers.CharField(required=False, allow_blank=True, default="")
+    email = serializers.EmailField(required=False, allow_blank=True, default="")
+    timezone = serializers.CharField(required=False, allow_blank=True, default="")
+    currency = serializers.CharField(required=False, allow_blank=True, default="")
+    star_rating = serializers.IntegerField(required=False, min_value=0, max_value=5, default=0)

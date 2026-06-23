@@ -1,45 +1,55 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from __future__ import annotations
+
+from django.utils import timezone
 from rest_framework import status
-from rest_framework.viewsets import ModelViewSet
-from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from apps.accounts.serializers import MeSerializer, InviteCreateSerializer, InviteAcceptSerializer
-from apps.accounts.models import StaffInvite
-from apps.common.permissions import IsAuthenticatedAndTenant, IsManagerOrOwner
-
-class MeView(APIView):
-    permission_classes = [IsAuthenticatedAndTenant]
-
-    def get(self, request):
-        return Response(MeSerializer(request.user).data)
+from . import services
+from .serializers import (
+    ChangePasswordSerializer,
+    ProfileUpdateSerializer,
+    RegisterSerializer,
+    UserSerializer,
+)
 
 
-class InviteViewSet(ModelViewSet):
-    serializer_class = InviteCreateSerializer
-    permission_classes = [IsAuthenticatedAndTenant, IsManagerOrOwner]
+class RegisterView(APIView):
+    """Public self-service registration. Membership in an org is granted separately."""
 
-    def get_queryset(self):
-        return StaffInvite.objects.filter(hotel=self.request.tenant).order_by("-created_at")
-
-
-class InviteAcceptView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        ser = InviteAcceptSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        user = ser.save()
-        return Response({"detail": "Invite accepted", "user_id": str(user.id)}, status=status.HTTP_201_CREATED)
+        serializer = RegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = services.create_user(**serializer.validated_data)
+        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
-class AuthTokenView(TokenObtainPairView):
-    """
-    JWT login. Tenant is resolved by middleware (subdomain / X-Hotel-Code).
-    """
-    pass
+class MeView(APIView):
+    """Read / update the authenticated user's own profile."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Touch last-seen on profile read (cheap heartbeat).
+        request.user.last_login_at = timezone.now()
+        request.user.save(update_fields=["last_login_at"])
+        return Response(UserSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        user = services.update_profile(user=request.user, **serializer.validated_data)
+        return Response(UserSerializer(user).data)
 
 
-class AuthRefreshView(TokenRefreshView):
-    pass
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.change_password(user=request.user, **serializer.validated_data)
+        return Response({"detail": "Password updated."}, status=status.HTTP_200_OK)

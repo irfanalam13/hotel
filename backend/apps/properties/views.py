@@ -1,64 +1,54 @@
-from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
-from apps.common.permissions import IsPropertyStaff, HasPropertyObjectAccess
-from .models import Property, Amenity, RoomType, Room
-from .serializers import PropertySerializer, AmenitySerializer, RoomTypeSerializer, RoomSerializer
+from __future__ import annotations
 
-def get_property_from_header(request):
-    prop_id = request.headers.get("X-PROPERTY-ID")
-    return Property.objects.get(id=prop_id)
+from rest_framework import status, viewsets
+from rest_framework.response import Response
 
-class PropertyViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Property.objects.all()
+from apps.rbac.constants import Perm
+from apps.rbac.permissions import HasOrgPermission
+
+from . import selectors, services
+from .serializers import PropertyCreateSerializer, PropertySerializer
+
+
+class PropertyViewSet(viewsets.ModelViewSet):
+    """
+    Tenant-scoped property CRUD. The active organization is resolved from the
+    ``X-Org-Slug`` header; the tenant-aware manager isolates the queryset.
+    """
+
     serializer_class = PropertySerializer
-    permission_classes = [IsAuthenticated]
-
-class AmenityViewSet(viewsets.ModelViewSet):
-    serializer_class = AmenitySerializer
-    permission_classes = [IsAuthenticated, IsPropertyStaff, HasPropertyObjectAccess]
-
-    def get_queryset(self):
-        prop = get_property_from_header(self.request)
-        return Amenity.objects.filter(property=prop)
-
-    def perform_create(self, serializer):
-        prop = get_property_from_header(self.request)
-        serializer.save(property=prop)
-
-class RoomTypeViewSet(viewsets.ModelViewSet):
-    serializer_class = RoomTypeSerializer
-    permission_classes = [IsAuthenticated, IsPropertyStaff, HasPropertyObjectAccess]
-    search_fields = ["name", "code"]
-    ordering_fields = ["name", "base_rate"]
+    permission_classes = [HasOrgPermission]
+    lookup_field = "id"
+    search_fields = ("name", "code", "city")
+    ordering_fields = ("name", "created_at")
+    required_permissions = {
+        "GET": {Perm.PROPERTY_VIEW},
+        "POST": {Perm.PROPERTY_MANAGE},
+        "PUT": {Perm.PROPERTY_MANAGE},
+        "PATCH": {Perm.PROPERTY_MANAGE},
+        "DELETE": {Perm.PROPERTY_MANAGE},
+    }
 
     def get_queryset(self):
-        prop = get_property_from_header(self.request)
-        return RoomType.objects.filter(property=prop).prefetch_related("amenities")
+        if getattr(self, "swagger_fake_view", False):
+            return selectors.Property.objects.none()
+        return selectors.list_properties(organization=self.request.organization)
 
-    def get_serializer_context(self):
-        ctx = super().get_serializer_context()
-        ctx["property"] = get_property_from_header(self.request)
-        return ctx
+    def create(self, request, *args, **kwargs):
+        serializer = PropertyCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        instance = services.create_property(
+            organization=request.organization, **serializer.validated_data
+        )
+        return Response(PropertySerializer(instance).data, status=status.HTTP_201_CREATED)
 
-    def perform_create(self, serializer):
-        prop = get_property_from_header(self.request)
-        serializer.save(property=prop)
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = PropertySerializer(instance, data=request.data, partial=kwargs.get("partial", False))
+        serializer.is_valid(raise_exception=True)
+        instance = services.update_property(instance=instance, **serializer.validated_data)
+        return Response(PropertySerializer(instance).data)
 
-class RoomViewSet(viewsets.ModelViewSet):
-    serializer_class = RoomSerializer
-    permission_classes = [IsAuthenticated, IsPropertyStaff, HasPropertyObjectAccess]
-    search_fields = ["number", "floor"]
-    ordering_fields = ["number", "housekeeping_status"]
-
-    def get_queryset(self):
-        prop = get_property_from_header(self.request)
-        return Room.objects.filter(property=prop).select_related("room_type")
-
-    def get_serializer_context(self):
-        ctx = super().get_serializer_context()
-        ctx["property"] = get_property_from_header(self.request)
-        return ctx
-
-    def perform_create(self, serializer):
-        prop = get_property_from_header(self.request)
-        serializer.save(property=prop)
+    def destroy(self, request, *args, **kwargs):
+        services.archive_property(instance=self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)

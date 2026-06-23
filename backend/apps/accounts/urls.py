@@ -1,17 +1,11 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-from apps.accounts.views import MeView, InviteViewSet, InviteAcceptView, AuthTokenView, AuthRefreshView
+from django.urls import path
 
-router = DefaultRouter()
-router.register(r"invites", InviteViewSet, basename="invites")
+from .views import ChangePasswordView, MeView, RegisterView
+
+app_name = "accounts"
 
 urlpatterns = [
+    path("auth/register/", RegisterView.as_view(), name="register"),
     path("me/", MeView.as_view(), name="me"),
-    path("invites/accept/", InviteAcceptView.as_view(), name="invite-accept"),
-
-    # JWT
-    path("auth/token/", AuthTokenView.as_view(), name="token"),
-    path("auth/refresh/", AuthRefreshView.as_view(), name="refresh"),
-
-    path("", include(router.urls)),
+    path("me/change-password/", ChangePasswordView.as_view(), name="change-password"),
 ]

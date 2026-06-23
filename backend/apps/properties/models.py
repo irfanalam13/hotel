@@ -1,67 +1,44 @@
-import uuid
+"""
+Properties — the physical hotels/branches a tenant operates.
+
+A ``Property`` is tenant-scoped: it inherits ``organization`` ownership, soft
+delete and tenant-aware managers from :class:`TenantScopedModel`, so reads are
+automatically isolated to the active organization.
+"""
+from __future__ import annotations
+
 from django.db import models
 
-class Property(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+from apps.common.models import TenantScopedModel
+
+
+class Property(TenantScopedModel):
     name = models.CharField(max_length=200)
-    code = models.SlugField(max_length=50, unique=True)  # e.g. "hotel-abc"
-    timezone = models.CharField(max_length=64, default="Asia/Kathmandu")
-    currency = models.CharField(max_length=10, default="NPR")
-    created_at = models.DateTimeField(auto_now_add=True)
+    code = models.SlugField(max_length=50)  # unique per organization
 
-    def __str__(self):
-        return self.name
+    # Location.
+    address = models.TextField(blank=True, default="")
+    city = models.CharField(max_length=120, blank=True, default="")
+    country = models.CharField(max_length=120, blank=True, default="")
 
-class Amenity(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="amenities")
-    name = models.CharField(max_length=120)
+    # Contact.
+    phone = models.CharField(max_length=32, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
 
-    class Meta:
-        unique_together = [("property", "name")]
-
-    def __str__(self):
-        return self.name
-
-class RoomType(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="room_types")
-    name = models.CharField(max_length=120)  # Deluxe, Standard
-    code = models.SlugField(max_length=40)   # deluxe, standard
-    max_adults = models.PositiveSmallIntegerField(default=2)
-    max_children = models.PositiveSmallIntegerField(default=0)
-    base_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # fallback price
-
-    amenities = models.ManyToManyField(Amenity, blank=True, related_name="room_types")
-
-    class Meta:
-        unique_together = [("property", "code")]
-
-    def __str__(self):
-        return f"{self.name} ({self.property.code})"
-
-class Room(models.Model):
-    class HousekeepingStatus(models.TextChoices):
-        CLEAN = "clean", "Clean"
-        DIRTY = "dirty", "Dirty"
-        INSPECT = "inspect", "Needs Inspection"
-        OOO = "ooo", "Out of Order"
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="rooms")
-    room_type = models.ForeignKey(RoomType, on_delete=models.PROTECT, related_name="rooms")
-    number = models.CharField(max_length=20)  # "101", "A-12"
-    floor = models.CharField(max_length=20, blank=True, default="")
+    # Operational defaults (fall back to the organization's settings).
+    timezone = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(max_length=8, blank=True, default="")
+    star_rating = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 
-    housekeeping_status = models.CharField(
-        max_length=20, choices=HousekeepingStatus.choices, default=HousekeepingStatus.CLEAN
-    )
-    notes = models.TextField(blank=True, default="")
-
     class Meta:
-        unique_together = [("property", "number")]
-        ordering = ["number"]
+        ordering = ["name"]
+        verbose_name_plural = "properties"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "code"], name="uniq_property_code_per_org"
+            )
+        ]
 
-    def __str__(self):
-        return f"{self.number} - {self.room_type.name}"
+    def __str__(self) -> str:
+        return f"{self.name} [{self.code}]"
